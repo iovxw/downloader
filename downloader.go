@@ -131,6 +131,7 @@ func (f FileDl) Start() {
 			return
 		}
 
+		// TODO: 多线程&断点续传支持
 		resp, err := http.Get(f.File.Url)
 		if err != nil {
 			f.touchOnError(0, err.Error())
