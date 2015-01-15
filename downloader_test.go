@@ -13,8 +13,6 @@ func Test_NewFile(t *testing.T) {
 		log.Println(err)
 	}
 
-	fmt.Printf("%+v\n", fileDl)
-
 	fileDl.OnStart(func(id string) {
 		fmt.Println(GetDownloader(id).File.Name, "download started")
 	})
@@ -29,6 +27,8 @@ func Test_NewFile(t *testing.T) {
 	fileDl.OnError(func(id string, errCode int, errStr string) {
 		log.Println(GetDownloader(id).File.Name, errStr)
 	})
+
+	fmt.Printf("%+v\n", fileDl)
 
 	fileDl.Start()
 	wg.Wait()
