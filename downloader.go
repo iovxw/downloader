@@ -17,9 +17,13 @@
 package downloader
 
 import (
+	"bytes"
 	"errors"
+	"io"
+	"io/ioutil"
 	"math/rand"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"time"
@@ -33,10 +37,19 @@ var (
 
 	// 文件名获取错误，用于精细错误处理
 	GetFileNameErr = errors.New("can not get file name")
+
+	downloaders = make(map[string]*FileDl)
 )
 
+// 获取一个文件的下载信息
+func GetDownloader(id string) *FileDl {
+	return downloaders[id]
+}
+
 // 创建新的文件下载
-func NewFile(name string, url string, size int64, storeDir string, id string) (*File, error) {
+//
+// name, size, id 为可选参数。
+func NewFileDl(name string, url string, size int64, storeDir string, id string) (*FileDl, error) {
 	// 获取文件信息
 	resp, err := http.Get(url)
 	if err != nil {
@@ -61,53 +74,128 @@ func NewFile(name string, url string, size int64, storeDir string, id string) (*
 		id = newID()
 	}
 
-	return &File{
-		Name:     name,
-		Url:      url,
-		Size:     size,
-		StoreDir: storeDir,
+	f := &FileDl{
+		File: FileInfo{
+			Name: name,
+			Url:  url,
+			Size: size,
+		},
 		ID:       id,
-	}, nil
+		StoreDir: storeDir,
+	}
+
+	downloaders[f.ID] = f
+
+	return f, nil
 }
 
 func newID() string { return strconv.FormatInt(r.Int63(), 36) }
 
-type File struct {
-	Name     string // 想要保存的文件名，留空则自动获取
-	Url      string // 下载地址
-	Size     int64  // 文件大小，留空则自动获取
+type FileDl struct {
+	File     FileInfo
+	ID       string // 任务ID
 	StoreDir string // 保存到的目录
-	ID       string // 文件ID，留空则自动生成
+
+	onStart  func(id string)
+	onPause  func(id string)
+	onResume func(id string)
+	onDelete func(id string)
+	onFinish func(id string)
+	onError  func(id string, errCode int, errStr string)
+}
+
+type FileInfo struct {
+	Name string // 想要保存的文件名
+	Url  string // 下载地址
+	Size int64  // 文件大小
+}
+
+func (f FileDl) Start() {
+	go func() {
+		fInfo, err := os.Stat(f.StoreDir)
+		if err != nil {
+			err = os.MkdirAll(f.StoreDir, 0700)
+			if err != nil {
+				f.touchOnError(0, err.Error())
+				return
+			}
+		}
+		if !fInfo.IsDir() {
+			f.touchOnError(0, f.StoreDir+" is a file")
+			return
+		}
+
+		file, err := os.Create(f.StoreDir + string(os.PathSeparator) + f.File.Name)
+		if err != nil {
+			f.touchOnError(0, err.Error())
+			return
+		}
+
+		resp, err := http.Get(f.File.Url)
+		if err != nil {
+			f.touchOnError(0, err.Error())
+			return
+		}
+		defer resp.Body.Close()
+
+		buf, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			f.touchOnError(0, err.Error())
+			return
+		}
+
+		_, err = io.Copy(file, bytes.NewReader(buf))
+		if err != nil {
+			f.touchOnError(0, err.Error())
+			return
+		}
+
+		f.touch(f.onFinish)
+	}()
+
+	f.touch(f.onStart)
 }
 
 // 任务开始时触发的事件
-func (f File) OnStart(fn func(id string)) {
-	fn(f.ID)
+func (f *FileDl) OnStart(fn func(id string)) {
+	f.onStart = fn
 }
 
 // 任务暂停时触发的事件
-func (f File) OnPause(fn func(id string)) {
-	fn(f.ID)
+func (f *FileDl) OnPause(fn func(id string)) {
+	f.onPause = fn
 }
 
 // 任务继续时触发的事件
-func (f File) OnResume(fn func(id string)) {
-	fn(f.ID)
+func (f *FileDl) OnResume(fn func(id string)) {
+	f.onResume = fn
 }
 
 // 任务删除时触发的事件
-func (f File) OnDelete(fn func(id string)) {
-	fn(f.ID)
+func (f *FileDl) OnDelete(fn func(id string)) {
+	f.onDelete = fn
 }
 
 // 任务完成时触发的事件
-func (f File) OnFinish(fn func(id string)) {
-	fn(f.ID)
+func (f *FileDl) OnFinish(fn func(id string)) {
+	f.onFinish = fn
 }
 
 // 任务出错时触发的事件
 //
 // errCode为错误码，errStr为错误描述
-func (f File) OnError(fn func(id string, errCode int, errStr string)) {
-	fn(f.ID, 0, "")
+func (f *FileDl) OnError(fn func(id string, errCode int, errStr string)) {
+	f.onError = fn
+}
+
+func (f FileDl) touch(fn func(id string)) {
+	if fn != nil {
+		fn(f.ID)
+	}
+}
+
+func (f FileDl) touchOnError(errCode int, errStr string) {
+	if f.onError != nil {
+		f.onError(f.ID, errCode, errStr)
+	}
 }
