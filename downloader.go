@@ -135,7 +135,7 @@ func (f FileDl) Start() {
 
 		var blockList []block
 
-		if f.File.Size == 0 {
+		if f.File.Size <= 0 {
 			blockList = append(blockList, block{0, -1})
 		} else {
 			blockSize := f.File.Size / int64(MaxThread)
@@ -149,13 +149,15 @@ func (f FileDl) Start() {
 
 		for _, v := range blockList {
 			// TODO: 断点续传支持
-			block, err := f.downloadBlock(v.begin, v.end)
+			go func() {
+				block, err := f.downloadBlock(v.begin, v.end)
 
-			_, err = file.WriteAt(block, v.begin)
-			if err != nil {
-				f.touchOnError(0, err.Error())
-				return
-			}
+				_, err = file.WriteAt(block, v.begin)
+				if err != nil {
+					f.touchOnError(0, err.Error())
+					return
+				}
+			}()
 		}
 
 		f.touch(f.onFinish)
@@ -170,7 +172,7 @@ func (f FileDl) downloadBlock(begin, end int64) ([]byte, error) {
 		return nil, err
 	}
 	if end != -1 {
-		request.Header.Set("Range", "bytes="+strconv.FormatInt(begin, 10)+"-"+strconv.FormatInt(begin, 10))
+		request.Header.Set("Range", "bytes="+strconv.FormatInt(begin, 10)+"-"+strconv.FormatInt(end, 10))
 	}
 
 	resp, err := http.DefaultClient.Do(request)
