@@ -17,9 +17,7 @@
 package downloader
 
 import (
-	"bytes"
 	"errors"
-	"io"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
@@ -30,20 +28,22 @@ import (
 )
 
 var (
-	// 用于获取文件名
-	getName = regexp.MustCompile(`^.{0,}?([^/&=]+)$`)
-	// 随机数生成器，生成ID用。放在全局以不用多次生成生成器
-	r = rand.New(rand.NewSource(time.Now().UnixNano()))
+	// 最大线程数量
+	MaxThread = 5
 
 	// 文件名获取错误，用于精细错误处理
 	GetFileNameErr = errors.New("can not get file name")
 
-	downloaders = make(map[string]*FileDl)
+	// 用于获取文件名
+	getName        = regexp.MustCompile(`^.{0,}?([^/&=]+)$`)
+	downloaderList = make(map[string]*FileDl)
+	// 随机数生成器，生成ID用。放在全局以不用多次生成生成器
+	r = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
 
 // 获取一个文件的下载信息
 func GetDownloader(id string) *FileDl {
-	return downloaders[id]
+	return downloaderList[id]
 }
 
 // 创建新的文件下载
@@ -84,7 +84,7 @@ func NewFileDl(name string, url string, size int64, storeDir string, id string) 
 		StoreDir: storeDir,
 	}
 
-	downloaders[f.ID] = f
+	downloaderList[f.ID] = f
 
 	return f, nil
 }
@@ -110,11 +110,12 @@ type FileInfo struct {
 	Size int64  // 文件大小
 }
 
+// 开始下载
 func (f FileDl) Start() {
 	go func() {
 		fInfo, err := os.Stat(f.StoreDir)
 		if err != nil {
-			err = os.MkdirAll(f.StoreDir, 0700)
+			err = os.MkdirAll(f.StoreDir, 0644)
 			if err != nil {
 				f.touchOnError(0, err.Error())
 				return
@@ -130,31 +131,60 @@ func (f FileDl) Start() {
 			f.touchOnError(0, err.Error())
 			return
 		}
+		defer file.Close()
 
-		// TODO: 多线程&断点续传支持
-		resp, err := http.Get(f.File.Url)
-		if err != nil {
-			f.touchOnError(0, err.Error())
-			return
+		var blockList []block
+
+		if f.File.Size == 0 {
+			blockList = append(blockList, block{0, -1})
+		} else {
+			blockSize := f.File.Size / int64(MaxThread)
+			// 数据平均分配给各个线程
+			for i := 0; i < MaxThread; i++ {
+				blockList = append(blockList, block{int64(i) * blockSize, (int64(i) + 1) * blockSize})
+			}
+			// 将余出数据分配给最后一个线程
+			blockList[MaxThread-1].end += f.File.Size - blockList[MaxThread-1].end
 		}
-		defer resp.Body.Close()
 
-		buf, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			f.touchOnError(0, err.Error())
-			return
-		}
+		for _, v := range blockList {
+			// TODO: 断点续传支持
+			block, err := f.downloadBlock(v.begin, v.end)
 
-		_, err = io.Copy(file, bytes.NewReader(buf))
-		if err != nil {
-			f.touchOnError(0, err.Error())
-			return
+			_, err = file.WriteAt(block, v.begin)
+			if err != nil {
+				f.touchOnError(0, err.Error())
+				return
+			}
 		}
 
 		f.touch(f.onFinish)
 	}()
 
 	f.touch(f.onStart)
+}
+
+func (f FileDl) downloadBlock(begin, end int64) ([]byte, error) {
+	request, err := http.NewRequest("GET", f.File.Url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if end != -1 {
+		request.Header.Set("Range", "bytes="+strconv.FormatInt(begin, 10)+"-"+strconv.FormatInt(begin, 10))
+	}
+
+	resp, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	block, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	return block, nil
 }
 
 // 任务开始时触发的事件
@@ -199,4 +229,9 @@ func (f FileDl) touchOnError(errCode int, errStr string) {
 	if f.onError != nil {
 		f.onError(f.ID, errCode, errStr)
 	}
+}
+
+type block struct {
+	begin int64
+	end   int64
 }
