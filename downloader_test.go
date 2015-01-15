@@ -19,13 +19,17 @@ func Test_NewFile(t *testing.T) {
 		fmt.Println(GetDownloader(id).File.Name, "download started")
 	})
 
-	fileDl.Start()
-
 	var wg sync.WaitGroup
 	wg.Add(1)
 	fileDl.OnFinish(func(id string) {
 		fmt.Println(GetDownloader(id).File.Name, "download finished")
 		wg.Done()
 	})
+
+	fileDl.OnError(func(id string, errCode int, errStr string) {
+		log.Println(GetDownloader(id).File.Name, errStr)
+	})
+
+	fileDl.Start()
 	wg.Wait()
 }
