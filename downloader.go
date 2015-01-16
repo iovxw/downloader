@@ -31,7 +31,7 @@ import (
 
 var (
 	// 最大线程数量
-	MaxThread = 1
+	MaxThread = 5
 	// 缓冲区大小
 	CacheSize = 1024
 
@@ -45,7 +45,7 @@ var (
 	r = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
 
-// 获取一个文件的下载信息
+// 根据ID获取一个文件的下载信息
 func GetDownloader(id string) *FileDl {
 	return downloaderList[id]
 }
@@ -109,20 +109,6 @@ type FileDl struct {
 
 	paused bool
 	status Status
-}
-
-type FileInfo struct {
-	Name string // 想要保存的文件名
-	Url  string // 下载地址
-	Size int64  // 文件大小
-
-	f         *os.File
-	blockList []block // 用于记录未下载的文件块起始位置
-}
-
-type Status struct {
-	Downloaded int64
-	Speeds     int64
 }
 
 // 开始下载
@@ -364,6 +350,12 @@ func (f *FileDl) Resume() {
 	f.touch(f.onResume)
 }
 
+// 删除任务
+func (f FileDl) Delete() {
+	delete(downloaderList, f.ID)
+	f.touch(f.onDelete)
+}
+
 // 任务开始时触发的事件
 func (f *FileDl) OnStart(fn func()) {
 	f.onStart = fn
@@ -408,6 +400,20 @@ func (f FileDl) touchOnError(errCode int, errStr string) {
 	if f.onError != nil {
 		go f.onError(errCode, errStr)
 	}
+}
+
+type FileInfo struct {
+	Name string // 想要保存的文件名
+	Url  string // 下载地址
+	Size int64  // 文件大小
+
+	f         *os.File
+	blockList []block // 用于记录未下载的文件块起始位置
+}
+
+type Status struct {
+	Downloaded int64
+	Speeds     int64
 }
 
 type block struct {
