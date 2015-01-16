@@ -19,7 +19,6 @@ package downloader
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"math/rand"
@@ -33,9 +32,9 @@ import (
 
 var (
 	// 最大线程数量
-	MaxThread = 5
+	MaxThread = 10
 	// 缓冲区大小
-	CacheSize = 1024
+	CacheSize = 10240
 
 	// 文件名获取错误，用于精细错误处理
 	GetFileNameErr = errors.New("can not get file name")
@@ -151,8 +150,6 @@ func (f *FileDl) Start() {
 			f.File.blockList[MaxThread-1].End += f.File.Size - f.File.blockList[MaxThread-1].End
 		}
 
-		fmt.Println(f.File.blockList)
-
 		f.startGetSpeeds()
 		var wg sync.WaitGroup
 		wg.Add(MaxThread)
@@ -169,6 +166,10 @@ func (f *FileDl) Start() {
 		}
 		wg.Wait()
 		f.paused = true
+		err = os.Remove(f.StoreDir + string(os.PathSeparator) + f.File.Name + ".dl")
+		if err != nil {
+			f.touchOnError(0, err.Error())
+		}
 		f.touch(f.onFinish)
 	}()
 
@@ -258,7 +259,7 @@ func (f *FileDl) downloadBlock(id int) error {
 				if err != nil {
 					println(err.Error())
 				}
-				// 保存块的下载信息
+				// 保存块的下载信息。用于断点续传
 				err = ioutil.WriteFile(f.StoreDir+string(os.PathSeparator)+f.File.Name+".dl", byt, 0644)
 				if err != nil {
 					println(err.Error())
