@@ -47,7 +47,6 @@ var (
 // 创建新的文件下载
 //
 // 如果想定义其他属性，应手动创建 *FileDl
-// 然后以ID为key添加到 DownloaderList
 func NewFileDl(url string, storeDir string) (*FileDl, error) {
 	// 获取文件信息
 	resp, err := http.Get(url)
