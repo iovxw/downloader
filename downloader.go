@@ -18,18 +18,22 @@ package downloader
 
 import (
 	"errors"
-	"io/ioutil"
+	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"os"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 )
 
 var (
 	// 最大线程数量
 	MaxThread = 5
+	// 缓冲区大小
+	CacheSize = 1024
 
 	// 文件名获取错误，用于精细错误处理
 	GetFileNameErr = errors.New("can not get file name")
@@ -102,63 +106,52 @@ type FileDl struct {
 	onDelete func(id string)
 	onFinish func(id string)
 	onError  func(id string, errCode int, errStr string)
+
+	paused    bool
+	blockList []block
 }
 
 type FileInfo struct {
 	Name string // 想要保存的文件名
 	Url  string // 下载地址
 	Size int64  // 文件大小
+	f    *os.File
 }
 
 // 开始下载
-func (f FileDl) Start() {
+func (f *FileDl) Start() {
 	go func() {
-		fInfo, err := os.Stat(f.StoreDir)
-		if err != nil {
-			err = os.MkdirAll(f.StoreDir, 0644)
-			if err != nil {
-				f.touchOnError(0, err.Error())
-				return
-			}
-		}
-		if !fInfo.IsDir() {
-			f.touchOnError(0, f.StoreDir+" is a file")
-			return
-		}
-
-		file, err := os.Create(f.StoreDir + string(os.PathSeparator) + f.File.Name)
+		err := f.openFile(true)
 		if err != nil {
 			f.touchOnError(0, err.Error())
-			return
 		}
-		defer file.Close()
-
-		var blockList []block
+		defer f.File.f.Close()
 
 		if f.File.Size <= 0 {
-			blockList = append(blockList, block{0, -1})
+			f.blockList = append(f.blockList, block{0, -1})
 		} else {
 			blockSize := f.File.Size / int64(MaxThread)
 			// 数据平均分配给各个线程
 			for i := 0; i < MaxThread; i++ {
-				blockList = append(blockList, block{int64(i) * blockSize, (int64(i) + 1) * blockSize})
+				f.blockList = append(f.blockList, block{int64(i) * blockSize, (int64(i) + 1) * blockSize})
 			}
 			// 将余出数据分配给最后一个线程
-			blockList[MaxThread-1].end += f.File.Size - blockList[MaxThread-1].end
+			f.blockList[MaxThread-1].end += f.File.Size - f.blockList[MaxThread-1].end
 		}
 
-		for _, v := range blockList {
+		var wg sync.WaitGroup
+		wg.Add(MaxThread)
+		for i := range f.blockList {
 			// TODO: 断点续传支持
-			go func() {
-				block, err := f.downloadBlock(v.begin, v.end)
-
-				_, err = file.WriteAt(block, v.begin)
+			go func(i uint) {
+				defer wg.Done()
+				err := f.downloadBlock(i)
 				if err != nil {
-					f.touchOnError(0, err.Error())
-					return
+
 				}
-			}()
+			}(uint(i))
 		}
+		wg.Wait()
 
 		f.touch(f.onFinish)
 	}()
@@ -166,27 +159,104 @@ func (f FileDl) Start() {
 	f.touch(f.onStart)
 }
 
-func (f FileDl) downloadBlock(begin, end int64) ([]byte, error) {
+func (f *FileDl) openFile(rewrite bool) error {
+	dirInfo, err := os.Stat(f.StoreDir)
+	if err != nil {
+		err = os.MkdirAll(f.StoreDir, 0644)
+		if err != nil {
+			return err
+		}
+	}
+	if !dirInfo.IsDir() {
+		return errors.New(f.StoreDir + " is a file")
+	}
+
+	var file *os.File
+	filePath := f.StoreDir + string(os.PathSeparator) + f.File.Name
+
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		// 文件不存在，创建
+		file, err = os.Create(filePath)
+		if err != nil {
+			return err
+		}
+	}
+	if fileInfo.IsDir() {
+		return errors.New(filePath + " is a dir")
+	}
+
+	// 文件已存在，是否重写
+	if rewrite {
+		file, err = os.Create(filePath)
+		if err != nil {
+			return err
+		}
+	} else {
+		file, err = os.Open(filePath)
+		if err != nil {
+			return err
+		}
+	}
+	f.File.f = file
+
+	return nil
+}
+
+func (f FileDl) downloadBlock(thirdNum uint) error {
 	request, err := http.NewRequest("GET", f.File.Url, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if end != -1 {
-		request.Header.Set("Range", "bytes="+strconv.FormatInt(begin, 10)+"-"+strconv.FormatInt(end, 10))
+	if f.blockList[thirdNum].end != -1 {
+		request.Header.Set(
+			"Range",
+			"bytes="+strconv.FormatInt(f.blockList[thirdNum].begin, 10)+"-"+strconv.FormatInt(f.blockList[thirdNum].end, 10),
+		)
 	}
 
 	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 
-	block, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+	var block = make([]byte, CacheSize)
+LOOP:
+	for i := 1; ; i++ {
+		switch {
+		case f.paused == true:
+			break LOOP
+		default:
+			n, err := resp.Body.Read(block)
+			fmt.Println(len(block), n, f.blockList[thirdNum].begin)
+			f.blockList[thirdNum].begin += int64(len(block[:n]))
+			fmt.Println(f.blockList[thirdNum].begin)
+			f.writeBlock(block, thirdNum)
+			if err != nil {
+				if err == io.EOF {
+					break LOOP
+				}
+				return err
+			}
+		}
 	}
 
-	return block, nil
+	return nil
+}
+
+func (f *FileDl) writeBlock(block []byte, thirdNum uint) {
+	f.File.f.WriteAt(block, f.blockList[thirdNum].begin)
+}
+
+func (f FileDl) Pause() {
+	f.paused = true
+	f.touch(f.onPause)
+}
+
+func (f FileDl) Resume() {
+	f.paused = false
+	f.touch(f.onResume)
 }
 
 // 任务开始时触发的事件
