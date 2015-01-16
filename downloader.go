@@ -17,8 +17,11 @@
 package downloader
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"os"
@@ -107,6 +110,7 @@ type FileDl struct {
 	onError  func(id string, errCode int, errStr string)
 
 	paused bool
+	status Status
 }
 
 type FileInfo struct {
@@ -116,6 +120,11 @@ type FileInfo struct {
 
 	f         *os.File
 	blockList []block // 用于记录未下载的文件块起始位置
+}
+
+type Status struct {
+	Downloaded int64
+	Speeds     int64
 }
 
 // 开始下载
@@ -131,28 +140,35 @@ func (f *FileDl) Start() {
 			f.File.blockList = append(f.File.blockList, block{0, -1})
 		} else {
 			blockSize := f.File.Size / int64(MaxThread)
+			var begin int64
 			// 数据平均分配给各个线程
 			for i := 0; i < MaxThread; i++ {
-				f.File.blockList = append(f.File.blockList, block{int64(i) * blockSize, (int64(i) + 1) * blockSize})
+				var end = (int64(i) + 1) * blockSize
+				f.File.blockList = append(f.File.blockList, block{begin, end})
+				begin = end + 1
 			}
 			// 将余出数据分配给最后一个线程
-			f.File.blockList[MaxThread-1].end += f.File.Size - f.File.blockList[MaxThread-1].end
+			f.File.blockList[MaxThread-1].End += f.File.Size - f.File.blockList[MaxThread-1].End
 		}
 
+		fmt.Println(f.File.blockList)
+
+		f.startGetSpeeds()
 		var wg sync.WaitGroup
 		wg.Add(MaxThread)
 		for i := range f.File.blockList {
 			// TODO: 断点续传支持
-			go func(i uint) {
+			go func(id int) {
 				defer wg.Done()
-				err := f.downloadBlock(i)
+
+				err := f.downloadBlock(id)
 				if err != nil {
 
 				}
-			}(uint(i))
+			}(i)
 		}
 		wg.Wait()
-
+		f.paused = true
 		f.touch(f.onFinish)
 	}()
 
@@ -208,15 +224,17 @@ func (f *FileDl) openFile(rewrite bool) error {
 
 // 文件块下载器
 // 根据线程ID获取下载块的起始位置
-func (f FileDl) downloadBlock(thirdNum uint) error {
+func (f *FileDl) downloadBlock(id int) error {
 	request, err := http.NewRequest("GET", f.File.Url, nil)
 	if err != nil {
 		return err
 	}
-	if f.File.blockList[thirdNum].end != -1 {
+	begin := f.File.blockList[id].Begin
+	end := f.File.blockList[id].End
+	if end != -1 {
 		request.Header.Set(
 			"Range",
-			"bytes="+strconv.FormatInt(f.File.blockList[thirdNum].begin, 10)+"-"+strconv.FormatInt(f.File.blockList[thirdNum].end, 10),
+			"bytes="+strconv.FormatInt(begin, 10)+"-"+strconv.FormatInt(end, 10),
 		)
 	}
 
@@ -227,20 +245,31 @@ func (f FileDl) downloadBlock(thirdNum uint) error {
 	defer resp.Body.Close()
 
 	var buf = make([]byte, CacheSize)
-LOOP:
-	for i := 1; ; i++ {
+	for {
 		switch {
 		case f.paused == true:
-			break LOOP
+			return nil
 		default:
 			n, err := resp.Body.Read(buf)
-			// 根据下载的大小，增加块的起始位置
-			f.File.blockList[thirdNum].begin += int64(len(buf[:n]))
 			// 将缓冲数据写入硬盘
-			f.writeBlock(buf, thirdNum)
+			func() {
+				f.File.f.WriteAt(append(buf[:n], []byte{}...), f.File.blockList[id].Begin)
+				byt, err := json.Marshal(f.File.blockList)
+				if err != nil {
+					println(err.Error())
+				}
+				// 保存块的下载信息
+				err = ioutil.WriteFile(f.StoreDir+string(os.PathSeparator)+f.File.Name+".dl", byt, 0644)
+				if err != nil {
+					println(err.Error())
+				}
+
+				f.status.Downloaded += int64(len(buf[:n]))
+			}()
+			f.File.blockList[id].Begin += int64(len(buf[:n]))
 			if err != nil {
 				if err == io.EOF {
-					break LOOP
+					return nil
 				}
 				return err
 			}
@@ -250,10 +279,25 @@ LOOP:
 	return nil
 }
 
-// 将下载的文件块写入硬盘
-// 根据线程编号来获取写入起始位置
-func (f *FileDl) writeBlock(block []byte, thirdNum uint) {
-	f.File.f.WriteAt(block, f.File.blockList[thirdNum].begin)
+func (f *FileDl) startGetSpeeds() {
+	go func() {
+		var old = f.status.Downloaded
+		for {
+			if f.paused {
+				f.status.Speeds = 0
+				return
+			} else {
+				time.Sleep(time.Millisecond * 100)
+				f.status.Speeds = f.status.Downloaded - old
+				old = f.status.Downloaded
+			}
+		}
+	}()
+}
+
+// 获取下载统计信息
+func (f FileDl) GetStatus() Status {
+	return f.status
 }
 
 // 暂停下载
@@ -315,6 +359,6 @@ func (f FileDl) touchOnError(errCode int, errStr string) {
 }
 
 type block struct {
-	begin int64
-	end   int64
+	Begin int64 `json:"begin"`
+	End   int64 `json:"end"`
 }

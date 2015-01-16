@@ -3,8 +3,10 @@ package downloader
 import (
 	"fmt"
 	"log"
-	"sync"
+	"os"
+	"strings"
 	"testing"
+	"time"
 )
 
 func Test_NewFile(t *testing.T) {
@@ -17,11 +19,10 @@ func Test_NewFile(t *testing.T) {
 		fmt.Println(GetDownloader(id).File.Name, "download started")
 	})
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+	exit := make(chan bool)
+
 	fileDl.OnFinish(func(id string) {
-		fmt.Println(GetDownloader(id).File.Name, "download finished")
-		wg.Done()
+		exit <- true
 	})
 
 	fileDl.OnError(func(id string, errCode int, errStr string) {
@@ -31,5 +32,18 @@ func Test_NewFile(t *testing.T) {
 	fmt.Printf("%+v\n", fileDl)
 
 	fileDl.Start()
-	wg.Wait()
+	for {
+		select {
+		case <-exit:
+			fmt.Println("\n", fileDl.File.Name, "download finished")
+			os.Exit(0)
+		default:
+			time.Sleep(time.Second * 1)
+			status := fileDl.GetStatus()
+			var i = float64(status.Downloaded) / float64(fileDl.File.Size) * 100
+			h := strings.Repeat("=", int(i/2)) + strings.Repeat(" ", 50-int(i/2))
+			fmt.Printf("\r%.0f%%[%s] %v byte/s          ", i, h, status.Speeds)
+			os.Stdout.Sync()
+		}
+	}
 }
