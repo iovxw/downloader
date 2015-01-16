@@ -32,9 +32,9 @@ import (
 
 var (
 	// 最大线程数量
-	MaxThread = 10
+	MaxThread = 5
 	// 缓冲区大小
-	CacheSize = 10240
+	CacheSize = 1024
 
 	// 文件名获取错误，用于精细错误处理
 	GetFileNameErr = errors.New("can not get file name")
