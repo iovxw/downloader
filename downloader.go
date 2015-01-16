@@ -21,10 +21,8 @@ import (
 	"errors"
 	"io"
 	"io/ioutil"
-	"math/rand"
 	"net/http"
 	"os"
-	"regexp"
 	"strconv"
 	"time"
 )
@@ -37,17 +35,12 @@ var (
 
 	// 文件名获取错误，用于精细错误处理
 	GetFileNameErr = errors.New("can not get file name")
-
-	// 用于获取文件名
-	getName = regexp.MustCompile(`^.{0,}?([^/&=]+)$`)
-	// 随机数生成器，生成ID用。放在全局以不用多次生成生成器
-	r = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
 
 // 创建新的文件下载
 //
 // 如果想定义其他属性，应手动创建 *FileDl
-func NewFileDl(url string, storeDir string) (*FileDl, error) {
+func NewFileDl(url string, file *os.File) (*FileDl, error) {
 	// 获取文件信息
 	resp, err := http.Get(url)
 	if err != nil {
@@ -55,35 +48,23 @@ func NewFileDl(url string, storeDir string) (*FileDl, error) {
 	}
 	defer resp.Body.Close()
 
-	buf := getName.FindStringSubmatch(url)
-	if len(buf) == 0 {
-		return nil, GetFileNameErr
-	}
-	name := buf[1]
-
 	size := resp.ContentLength
 
-	id := newID()
-
 	f := &FileDl{
-		File: FileInfo{
-			Name: name,
-			Url:  url,
-			Size: size,
-		},
-		ID:       id,
-		StoreDir: storeDir,
+		Url:  url,
+		Size: size,
+		File: file,
 	}
 
 	return f, nil
 }
 
-func newID() string { return strconv.FormatInt(r.Int63(), 36) }
-
 type FileDl struct {
-	File     FileInfo
-	ID       string // 任务ID
-	StoreDir string // 保存到的目录
+	Url  string   // 下载地址
+	Size int64    // 文件大小
+	File *os.File // 要写入的文件
+
+	BlockList []Block // 用于记录未下载的文件块起始位置
 
 	onStart  func()
 	onPause  func()
@@ -99,29 +80,23 @@ type FileDl struct {
 // 开始下载
 func (f *FileDl) Start() {
 	go func() {
-		err := f.openFile(true)
-		if err != nil {
-			f.touchOnError(0, err.Error())
-			return
-		}
-
-		if f.File.Size <= 0 {
-			f.File.blockList = append(f.File.blockList, block{0, -1})
+		if f.Size <= 0 {
+			f.BlockList = append(f.BlockList, Block{0, -1})
 		} else {
-			blockSize := f.File.Size / int64(MaxThread)
+			blockSize := f.Size / int64(MaxThread)
 			var begin int64
 			// 数据平均分配给各个线程
 			for i := 0; i < MaxThread; i++ {
 				var end = (int64(i) + 1) * blockSize
-				f.File.blockList = append(f.File.blockList, block{begin, end})
+				f.BlockList = append(f.BlockList, Block{begin, end})
 				begin = end + 1
 			}
 			// 将余出数据分配给最后一个线程
-			f.File.blockList[MaxThread-1].End += f.File.Size - f.File.blockList[MaxThread-1].End
+			f.BlockList[MaxThread-1].End += f.Size - f.BlockList[MaxThread-1].End
 		}
 
 		// 开始下载
-		err = f.download()
+		err := f.download()
 		if err != nil {
 			f.touchOnError(0, err.Error())
 			return
@@ -131,63 +106,11 @@ func (f *FileDl) Start() {
 	f.touch(f.onStart)
 }
 
-// 用于创建文件
-// 如果文件已存在则打开文件
-// rewrite为true则直接覆盖文件
-func (f *FileDl) openFile(rewrite bool) error {
-	if f.File.f != nil {
-		// 文件已经打开
-		return nil
-	}
-	dirInfo, err := os.Stat(f.StoreDir)
-	if err != nil {
-		err = os.MkdirAll(f.StoreDir, 0644)
-		if err != nil {
-			return err
-		}
-	}
-	if !dirInfo.IsDir() {
-		return errors.New(f.StoreDir + " is a file")
-	}
-
-	var file *os.File
-	filePath := f.StoreDir + string(os.PathSeparator) + f.File.Name
-
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		// 文件不存在，创建
-		file, err = os.Create(filePath)
-		if err != nil {
-			return err
-		}
-	}
-	if fileInfo.IsDir() {
-		return errors.New(filePath + " is a dir")
-	}
-
-	// 文件已存在，是否重写
-	if rewrite {
-		file, err = os.Create(filePath)
-		if err != nil {
-			return err
-		}
-	} else {
-		file, err = os.Open(filePath)
-		if err != nil {
-			return err
-		}
-	}
-	f.File.f = file
-
-	return nil
-}
-
 func (f *FileDl) download() error {
 	f.startGetSpeeds()
 
 	ok := make(chan bool, MaxThread)
-	for i := range f.File.blockList {
-		// TODO: 断点续传支持
+	for i := range f.BlockList {
 		go func(id int) {
 			defer func() {
 				ok <- true
@@ -206,7 +129,7 @@ func (f *FileDl) download() error {
 	// 检查是否为暂停
 	if !f.paused {
 		f.paused = true
-		err := os.Remove(f.StoreDir + string(os.PathSeparator) + f.File.Name + ".dl")
+		err := os.Remove(f.File.Name() + ".dl")
 		if err != nil {
 			return err
 		}
@@ -218,12 +141,12 @@ func (f *FileDl) download() error {
 // 文件块下载器
 // 根据线程ID获取下载块的起始位置
 func (f *FileDl) downloadBlock(id int) error {
-	request, err := http.NewRequest("GET", f.File.Url, nil)
+	request, err := http.NewRequest("GET", f.Url, nil)
 	if err != nil {
 		return err
 	}
-	begin := f.File.blockList[id].Begin
-	end := f.File.blockList[id].End
+	begin := f.BlockList[id].Begin
+	end := f.BlockList[id].End
 	if end != -1 {
 		request.Header.Set(
 			"Range",
@@ -247,21 +170,21 @@ func (f *FileDl) downloadBlock(id int) error {
 
 			func() {
 				// 将缓冲数据写入硬盘
-				f.File.f.WriteAt(buf[:n], f.File.blockList[id].Begin)
+				f.File.WriteAt(buf[:n], f.BlockList[id].Begin)
 			}()
 
 			// 保存块的下载信息。用于断点续传
-			byt, err := json.Marshal(f.File.blockList)
+			byt, err := json.Marshal(f.BlockList)
 			if err != nil {
 				return err
 			}
-			err = ioutil.WriteFile(f.StoreDir+string(os.PathSeparator)+f.File.Name+".dl", byt, 0644)
+			err = ioutil.WriteFile(f.File.Name()+".dl", byt, 0644)
 			if err != nil {
 				return err
 			}
 
 			f.status.Downloaded += int64(len(buf[:n]))
-			f.File.blockList[id].Begin += int64(len(buf[:n]))
+			f.BlockList[id].Begin += int64(len(buf[:n]))
 
 			if e != nil {
 				if e == io.EOF {
@@ -306,27 +229,21 @@ func (f *FileDl) Pause() {
 func (f *FileDl) Resume() {
 	f.paused = false
 	go func() {
-		err := f.openFile(false)
-		if err != nil {
-			f.touchOnError(0, err.Error())
-			return
-		}
-
-		if f.File.blockList == nil {
-			byt, err := ioutil.ReadFile(f.StoreDir + string(os.PathSeparator) + f.File.Name + ".dl")
+		if f.BlockList == nil {
+			byt, err := ioutil.ReadFile(f.File.Name() + ".dl")
 			if err != nil {
 				f.touchOnError(0, err.Error())
 				return
 			}
 
-			err = json.Unmarshal(byt, f.File.blockList)
+			err = json.Unmarshal(byt, f.BlockList)
 			if err != nil {
 				f.touchOnError(0, err.Error())
 				return
 			}
 		}
 
-		err = f.download()
+		err := f.download()
 		if err != nil {
 			f.touchOnError(0, err.Error())
 			return
@@ -376,21 +293,12 @@ func (f FileDl) touchOnError(errCode int, errStr string) {
 	}
 }
 
-type FileInfo struct {
-	Name string // 想要保存的文件名
-	Url  string // 下载地址
-	Size int64  // 文件大小
-
-	f         *os.File
-	blockList []block // 用于记录未下载的文件块起始位置
-}
-
 type Status struct {
 	Downloaded int64
 	Speeds     int64
 }
 
-type block struct {
+type Block struct {
 	Begin int64 `json:"begin"`
 	End   int64 `json:"end"`
 }
