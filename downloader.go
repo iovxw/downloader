@@ -32,9 +32,6 @@ var (
 	MaxThread = 5
 	// 缓冲区大小
 	CacheSize = 1024
-
-	// 文件名获取错误，用于精细错误处理
-	GetFileNameErr = errors.New("can not get file name")
 )
 
 // 创建新的文件下载
