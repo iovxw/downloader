@@ -288,7 +288,7 @@ func (f *FileDl) startGetSpeeds() {
 				f.status.Speeds = 0
 				return
 			} else {
-				time.Sleep(time.Millisecond * 100)
+				time.Sleep(time.Second * 1)
 				f.status.Speeds = f.status.Downloaded - old
 				old = f.status.Downloaded
 			}
