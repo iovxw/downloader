@@ -39,21 +39,16 @@ var (
 	GetFileNameErr = errors.New("can not get file name")
 
 	// 用于获取文件名
-	getName        = regexp.MustCompile(`^.{0,}?([^/&=]+)$`)
-	downloaderList = make(map[string]*FileDl)
+	getName = regexp.MustCompile(`^.{0,}?([^/&=]+)$`)
 	// 随机数生成器，生成ID用。放在全局以不用多次生成生成器
 	r = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
 
-// 根据ID获取一个文件的下载信息
-func GetDownloader(id string) *FileDl {
-	return downloaderList[id]
-}
-
 // 创建新的文件下载
 //
-// name, size, id 为可选参数。
-func NewFileDl(name string, url string, size int64, storeDir string, id string) (*FileDl, error) {
+// 如果想定义其他属性，应手动创建 *FileDl
+// 然后以ID为key添加到 DownloaderList
+func NewFileDl(url string, storeDir string) (*FileDl, error) {
 	// 获取文件信息
 	resp, err := http.Get(url)
 	if err != nil {
@@ -61,22 +56,15 @@ func NewFileDl(name string, url string, size int64, storeDir string, id string) 
 	}
 	defer resp.Body.Close()
 
-	if name == "" {
-		buf := getName.FindStringSubmatch(url)
-		if len(buf) != 0 {
-			name = buf[1]
-		} else {
-			return nil, GetFileNameErr
-		}
+	buf := getName.FindStringSubmatch(url)
+	if len(buf) == 0 {
+		return nil, GetFileNameErr
 	}
+	name := buf[1]
 
-	if size <= 0 {
-		size = resp.ContentLength
-	}
+	size := resp.ContentLength
 
-	if id == "" {
-		id = newID()
-	}
+	id := newID()
 
 	f := &FileDl{
 		File: FileInfo{
@@ -87,8 +75,6 @@ func NewFileDl(name string, url string, size int64, storeDir string, id string) 
 		ID:       id,
 		StoreDir: storeDir,
 	}
-
-	downloaderList[f.ID] = f
 
 	return f, nil
 }
@@ -350,12 +336,6 @@ func (f *FileDl) Resume() {
 	f.touch(f.onResume)
 }
 
-// 删除任务
-func (f FileDl) Delete() {
-	delete(downloaderList, f.ID)
-	f.touch(f.onDelete)
-}
-
 // 任务开始时触发的事件
 func (f *FileDl) OnStart(fn func()) {
 	f.onStart = fn
@@ -369,11 +349,6 @@ func (f *FileDl) OnPause(fn func()) {
 // 任务继续时触发的事件
 func (f *FileDl) OnResume(fn func()) {
 	f.onResume = fn
-}
-
-// 任务删除时触发的事件
-func (f *FileDl) OnDelete(fn func()) {
-	f.onDelete = fn
 }
 
 // 任务完成时触发的事件

@@ -11,7 +11,7 @@ import (
 )
 
 func Test_NewFile(t *testing.T) {
-	fileDl, err := NewFileDl("", "http://packages.linuxdeepin.com/ubuntu/dists/devel/main/binary-amd64/Packages.bz2", -1, "/tmp", "")
+	fileDl, err := NewFileDl("http://packages.linuxdeepin.com/ubuntu/dists/devel/main/binary-amd64/Packages.bz2", "/tmp")
 	if err != nil {
 		log.Println(err)
 	}
@@ -23,6 +23,7 @@ func Test_NewFile(t *testing.T) {
 	wg.Add(1)
 	fileDl.OnStart(func() {
 		fmt.Println(fileDl.File.Name, "download started")
+		format := "\033[2K\r%v/%v [%s] %v byte/s %v"
 		for {
 			status := fileDl.GetStatus()
 			var i = float64(status.Downloaded) / float64(fileDl.File.Size) * 50
@@ -30,16 +31,16 @@ func Test_NewFile(t *testing.T) {
 
 			select {
 			case <-exit:
-				fmt.Printf("\r%v/%v [%s] %v byte/s %v", status.Downloaded, fileDl.File.Size, h, 0, "[FINISH]")
+				fmt.Printf(format, status.Downloaded, fileDl.File.Size, h, 0, "[FINISH]")
 				fmt.Println("\n"+fileDl.File.Name, "download finished")
 				wg.Done()
 			default:
 				if !pause {
 					time.Sleep(time.Second * 1)
-					fmt.Printf("\r%v/%v [%s] %v byte/s         ", status.Downloaded, fileDl.File.Size, h, status.Speeds)
+					fmt.Printf(format, status.Downloaded, fileDl.File.Size, h, status.Speeds, "[DOWNLOADING]")
 					os.Stdout.Sync()
 				} else {
-					fmt.Printf("\r%v/%v [%s] %v byte/s %v", status.Downloaded, fileDl.File.Size, h, 0, "[PAUSE]")
+					fmt.Printf(format, status.Downloaded, fileDl.File.Size, h, 0, "[PAUSE]")
 					os.Stdout.Sync()
 					<-resume
 					pause = false
