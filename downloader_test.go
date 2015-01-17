@@ -17,7 +17,7 @@ func Test_NewFile(t *testing.T) {
 	}
 	defer file.Close()
 
-	fileDl, err := NewFileDl("http://packages.linuxdeepin.com/ubuntu/dists/devel/main/binary-amd64/Packages.bz2", file)
+	fileDl, err := NewFileDl("http://golangtc.com/static/go/go1.4.src.tar.gz", file, -1)
 	if err != nil {
 		log.Println(err)
 	}
@@ -28,7 +28,7 @@ func Test_NewFile(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	fileDl.OnStart(func() {
-		fmt.Println(fileDl.File.Name, "download started")
+		fmt.Println("download started")
 		format := "\033[2K\r%v/%v [%s] %v byte/s %v"
 		for {
 			status := fileDl.GetStatus()
@@ -67,8 +67,8 @@ func Test_NewFile(t *testing.T) {
 		exit <- true
 	})
 
-	fileDl.OnError(func(errCode int, errStr string) {
-		log.Fatal(fileDl.File.Name, errStr)
+	fileDl.OnError(func(errCode int, err error) {
+		log.Println(errCode, err)
 	})
 
 	fmt.Printf("%+v\n", fileDl)

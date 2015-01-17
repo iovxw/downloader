@@ -17,10 +17,8 @@
 package downloader
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"strconv"
@@ -29,23 +27,25 @@ import (
 
 var (
 	// 最大线程数量
-	MaxThread = 5
+	MaxThread = 50
 	// 缓冲区大小
 	CacheSize = 1024
 )
 
 // 创建新的文件下载
 //
-// 如果想定义其他属性，应手动创建 *FileDl
-func NewFileDl(url string, file *os.File) (*FileDl, error) {
-	// 获取文件信息
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+// 如果 size <= 0 则自动获取文件大小
+func NewFileDl(url string, file *os.File, size int64) (*FileDl, error) {
+	if size <= 0 {
+		// 获取文件信息
+		resp, err := http.Get(url)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
 
-	size := resp.ContentLength
+		size = resp.ContentLength
+	}
 
 	f := &FileDl{
 		Url:  url,
@@ -68,7 +68,7 @@ type FileDl struct {
 	onResume func()
 	onDelete func()
 	onFinish func()
-	onError  func(errCode int, errStr string)
+	onError  func(int, error)
 
 	paused bool
 	status Status
@@ -92,15 +92,14 @@ func (f *FileDl) Start() {
 			f.BlockList[MaxThread-1].End += f.Size - f.BlockList[MaxThread-1].End
 		}
 
+		f.touch(f.onStart)
 		// 开始下载
 		err := f.download()
 		if err != nil {
-			f.touchOnError(0, err.Error())
+			f.touchOnError(0, err)
 			return
 		}
 	}()
-
-	f.touch(f.onStart)
 }
 
 func (f *FileDl) download() error {
@@ -113,9 +112,14 @@ func (f *FileDl) download() error {
 				ok <- true
 			}()
 
-			err := f.downloadBlock(id)
-			if err != nil {
-				// TODO: 自动重新下载块
+			for {
+				err := f.downloadBlock(id)
+				if err != nil {
+					f.touchOnError(0, err)
+					// 重新下载
+					continue
+				}
+				break
 			}
 		}(i)
 	}
@@ -123,15 +127,14 @@ func (f *FileDl) download() error {
 	for i := 0; i < MaxThread; i++ {
 		<-ok
 	}
-	// 检查是否为暂停
-	if !f.paused {
-		f.paused = true
-		err := os.Remove(f.File.Name() + ".dl")
-		if err != nil {
-			return err
-		}
-		f.touch(f.onFinish)
+	// 检查是否为暂停导致的“下载完成”
+	if f.paused {
+		f.touch(f.onPause)
+		return nil
 	}
+	f.paused = true
+	f.touch(f.onFinish)
+
 	return nil
 }
 
@@ -159,36 +162,42 @@ func (f *FileDl) downloadBlock(id int) error {
 
 	var buf = make([]byte, CacheSize)
 	for {
-		switch {
-		case f.paused == true:
+		if f.paused == true {
+			// 下载暂停
 			return nil
-		default:
-			n, e := resp.Body.Read(buf)
+		}
 
-			func() {
-				// 将缓冲数据写入硬盘
-				f.File.WriteAt(buf[:n], f.BlockList[id].Begin)
-			}()
+		n, e := resp.Body.Read(buf)
 
-			// 保存块的下载信息。用于断点续传
-			byt, err := json.Marshal(f.BlockList)
-			if err != nil {
-				return err
+		bufSize := int64(len(buf[:n]))
+		// 检查下载的大小是否超出需要下载的大小
+		// 这里End+1是因为http的Range的end是包括在需要下载的数据内的
+		// 比如 0-1 的长度其实是2，所以这里end需要+1
+		needSize := f.BlockList[id].End + 1 - f.BlockList[id].Begin
+		if bufSize > needSize {
+			// 数据大小不正常
+			// 一般是因为网络环境不好导致
+			// 比如用中国电信下载国外文件
+
+			// 设置数据大小来去掉多余数据
+			// 并结束这个线程的下载
+			bufSize = needSize
+			n = int(needSize)
+			e = io.EOF
+		}
+		// 将缓冲数据写入硬盘
+		f.File.WriteAt(buf[:n], f.BlockList[id].Begin)
+
+		// 更新已下载大小
+		f.status.Downloaded += bufSize
+		f.BlockList[id].Begin += bufSize
+
+		if e != nil {
+			if e == io.EOF {
+				// 数据已经下载完毕
+				return nil
 			}
-			err = ioutil.WriteFile(f.File.Name()+".dl", byt, 0644)
-			if err != nil {
-				return err
-			}
-
-			f.status.Downloaded += int64(len(buf[:n]))
-			f.BlockList[id].Begin += int64(len(buf[:n]))
-
-			if e != nil {
-				if e == io.EOF {
-					return nil
-				}
-				return e
-			}
+			return e
 		}
 	}
 
@@ -202,11 +211,10 @@ func (f *FileDl) startGetSpeeds() {
 			if f.paused {
 				f.status.Speeds = 0
 				return
-			} else {
-				time.Sleep(time.Second * 1)
-				f.status.Speeds = f.status.Downloaded - old
-				old = f.status.Downloaded
 			}
+			time.Sleep(time.Second * 1)
+			f.status.Speeds = f.status.Downloaded - old
+			old = f.status.Downloaded
 		}
 	}()
 }
@@ -219,7 +227,6 @@ func (f FileDl) GetStatus() Status {
 // 暂停下载
 func (f *FileDl) Pause() {
 	f.paused = true
-	f.touch(f.onPause)
 }
 
 // 继续下载
@@ -227,26 +234,17 @@ func (f *FileDl) Resume() {
 	f.paused = false
 	go func() {
 		if f.BlockList == nil {
-			byt, err := ioutil.ReadFile(f.File.Name() + ".dl")
-			if err != nil {
-				f.touchOnError(0, err.Error())
-				return
-			}
-
-			err = json.Unmarshal(byt, f.BlockList)
-			if err != nil {
-				f.touchOnError(0, err.Error())
-				return
-			}
+			f.touchOnError(0, errors.New("BlockList == nil, can not get block info"))
+			return
 		}
 
+		f.touch(f.onResume)
 		err := f.download()
 		if err != nil {
-			f.touchOnError(0, err.Error())
+			f.touchOnError(0, err)
 			return
 		}
 	}()
-	f.touch(f.onResume)
 }
 
 // 任务开始时触发的事件
@@ -272,7 +270,7 @@ func (f *FileDl) OnFinish(fn func()) {
 // 任务出错时触发的事件
 //
 // errCode为错误码，errStr为错误描述
-func (f *FileDl) OnError(fn func(errCode int, errStr string)) {
+func (f *FileDl) OnError(fn func(int, error)) {
 	f.onError = fn
 }
 
@@ -284,9 +282,9 @@ func (f FileDl) touch(fn func()) {
 }
 
 // 触发Error事件
-func (f FileDl) touchOnError(errCode int, errStr string) {
+func (f FileDl) touchOnError(errCode int, err error) {
 	if f.onError != nil {
-		go f.onError(errCode, errStr)
+		go f.onError(errCode, err)
 	}
 }
 
