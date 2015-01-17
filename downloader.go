@@ -27,7 +27,7 @@ import (
 
 var (
 	// 最大线程数量
-	MaxThread = 50
+	MaxThread = 5
 	// 缓冲区大小
 	CacheSize = 1024
 )
@@ -170,20 +170,22 @@ func (f *FileDl) downloadBlock(id int) error {
 		n, e := resp.Body.Read(buf)
 
 		bufSize := int64(len(buf[:n]))
-		// 检查下载的大小是否超出需要下载的大小
-		// 这里End+1是因为http的Range的end是包括在需要下载的数据内的
-		// 比如 0-1 的长度其实是2，所以这里end需要+1
-		needSize := f.BlockList[id].End + 1 - f.BlockList[id].Begin
-		if bufSize > needSize {
-			// 数据大小不正常
-			// 一般是因为网络环境不好导致
-			// 比如用中国电信下载国外文件
+		if end != -1 {
+			// 检查下载的大小是否超出需要下载的大小
+			// 这里End+1是因为http的Range的end是包括在需要下载的数据内的
+			// 比如 0-1 的长度其实是2，所以这里end需要+1
+			needSize := f.BlockList[id].End + 1 - f.BlockList[id].Begin
+			if bufSize > needSize {
+				// 数据大小不正常
+				// 一般是因为网络环境不好导致
+				// 比如用中国电信下载国外文件
 
-			// 设置数据大小来去掉多余数据
-			// 并结束这个线程的下载
-			bufSize = needSize
-			n = int(needSize)
-			e = io.EOF
+				// 设置数据大小来去掉多余数据
+				// 并结束这个线程的下载
+				bufSize = needSize
+				n = int(needSize)
+				e = io.EOF
+			}
 		}
 		// 将缓冲数据写入硬盘
 		f.File.WriteAt(buf[:n], f.BlockList[id].Begin)
