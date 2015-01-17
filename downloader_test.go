@@ -17,7 +17,7 @@ func Test_NewFile(t *testing.T) {
 	}
 	defer file.Close()
 
-	fileDl, err := NewFileDl("http://golangtc.com/static/go/go1.4.src.tar.gz", file, -1)
+	fileDl, err := NewFileDl("http://packages.linuxdeepin.com/ubuntu/dists/devel/main/binary-amd64/Packages.bz2", file, -1)
 	if err != nil {
 		log.Println(err)
 	}
